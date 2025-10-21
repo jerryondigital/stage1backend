@@ -7,18 +7,48 @@ app = Flask(__name__)
 # In-memory database
 database = {}
 
-# Helper function to analyze string
+# Helper functions
 def analyze_string(value):
+    value_clean = value.lower()
+    length = len(value)
+    word_count = len(value.split())
+    unique_characters = len(set(value))
+    is_palindrome = value_clean == value_clean[::-1]
+    sha256_hash = hashlib.sha256(value.encode()).hexdigest()
+    
+    char_freq = {}
+    for char in value:
+        char_freq[char] = char_freq.get(char, 0) + 1
+
     return {
-        "length": len(value),
-        "is_uppercase": value.isupper(),
-        "is_lowercase": value.islower(),
-        "has_numbers": any(ch.isdigit() for ch in value),
-        "has_special_chars": any(not ch.isalnum() for ch in value),
-        "created_at": datetime.utcnow().isoformat() + "Z"
+        "length": length,
+        "is_palindrome": is_palindrome,
+        "unique_characters": unique_characters,
+        "word_count": word_count,
+        "sha256_hash": sha256_hash,
+        "character_frequency_map": char_freq
     }
 
-# Create a new string
+def parse_natural_language(query):
+    filters = {}
+    query_lower = query.lower()
+    if "palindrome" in query_lower:
+        filters["is_palindrome"] = True
+    if "single word" in query_lower:
+        filters["word_count"] = 1
+    if "longer than" in query_lower:
+        parts = query_lower.split("longer than")
+        try:
+            number = int(parts[1].split()[0])
+            filters["min_length"] = number + 1
+        except:
+            pass
+    for ch in "abcdefghijklmnopqrstuvwxyz":
+        if f"contains {ch}" in query_lower:
+            filters["contains_character"] = ch
+    return filters
+
+# Routes
 @app.route("/strings", methods=["POST"])
 def create_string():
     data = request.get_json()
@@ -42,7 +72,6 @@ def create_string():
     }
     return jsonify(database[string_hash]), 201
 
-# Get a specific string
 @app.route("/strings/<string_value>", methods=["GET"])
 def get_string(string_value):
     for item in database.values():
@@ -50,102 +79,59 @@ def get_string(string_value):
             return jsonify(item), 200
     return jsonify({"error": "String not found"}), 404
 
-# Get all strings
 @app.route("/strings", methods=["GET"])
 def get_all_strings():
     results = list(database.values())
-        # Retrieve query parameters
-    is_palindrome = request.args.get("is_palindrome")
-    min_length = request.args.get("min_length", type=int)
-    max_length = request.args.get("max_length", type=int)
-    word_count = request.args.get("word_count", type=int)
-    contains_character = request.args.get("contains_character")
 
-    # Apply filters
-    if is_palindrome is not None:
-        if is_palindrome.lower() not in ["true", "false"]:
-            return jsonify({"error": "Invalid value for is_palindrome"}), 400
-        results = [r for r in results if r["properties"]["is_palindrome"] == (is_palindrome.lower() == "true")]
+    # Filters from query params
+    args = request.args
+    try:
+        if "is_palindrome" in args:
+            val = args.get("is_palindrome").lower() == "true"
+            results = [r for r in results if r["properties"]["is_palindrome"] == val]
+        if "min_length" in args:
+            min_len = int(args.get("min_length"))
+            results = [r for r in results if r["properties"]["length"] >= min_len]
+        if "max_length" in args:
+            max_len = int(args.get("max_length"))
+            results = [r for r in results if r["properties"]["length"] <= max_len]
+        if "word_count" in args:
+            wc = int(args.get("word_count"))
+            results = [r for r in results if r["properties"]["word_count"] == wc]
+        if "contains_character" in args:
+            ch = args.get("contains_character")
+            results = [r for r in results if ch in r["value"]]
+    except:
+        return jsonify({"error": "Invalid query parameter values or types"}), 400
 
-    if min_length is not None:
-        results = [r for r in results if r["properties"]["length"] >= min_length]
-
-    if max_length is not None:
-        results = [r for r in results if r["properties"]["length"] <= max_length]
-
-    if word_count is not None:
-        results = [r for r in results if r["properties"]["word_count"] == word_count]
-
-    if contains_character:
-        if len(contains_character) != 1:
-            return jsonify({"error": "contains_character must be a single character"}), 400
-        results = [r for r in results if contains_character in r["value"]]
-
-    # Build response
-    response = {
-        "data": results,
-        "count": len(results),
-        "filters_applied": {
-            "is_palindrome": is_palindrome,
-            "min_length": min_length,
-            "max_length": max_length,
-            "word_count": word_count,
-            "contains_character": contains_character
-        }
-    }
-    return jsonify(response), 200
-
-    return jsonify(results), 200
-
-@app.route("/strings/<string_value>", methods=["DELETE"])
-def delete_string(string_value):
-    for key, item in list(database.items()):
-        if item["value"] == string_value:
-            del database[key]
-            return '', 204  # No Content
-    return jsonify({"error": "String not found"}), 404
+    filters_applied = {k: args.get(k) for k in args}
+    return jsonify({"data": results, "count": len(results), "filters_applied": filters_applied}), 200
 
 @app.route("/strings/filter-by-natural-language", methods=["GET"])
 def filter_by_natural_language():
     query = request.args.get("query")
     if not query:
         return jsonify({"error": "Missing 'query' parameter"}), 400
+    try:
+        filters = parse_natural_language(query)
+    except:
+        return jsonify({"error": "Unable to parse natural language query"}), 400
 
-    query_lower = query.lower()
-    filters = {}
-
-    # Simple parsing logic (you can expand this later)
-    if "palindromic" in query_lower or "palindrome" in query_lower:
-        filters["is_palindrome"] = True
-    if "single word" in query_lower:
-        filters["word_count"] = 1
-    if "longer than" in query_lower:
-        words = query_lower.split()
-        for i, word in enumerate(words):
-            if word == "than" and i + 1 < len(words):
-                try:
-                    filters["min_length"] = int(words[i + 1]) + 1
-                except ValueError:
-                    pass
-    if "containing the letter" in query_lower or "contains the letter" in query_lower:
-        parts = query_lower.split("letter")
-        if len(parts) > 1:
-            letter = parts[1].strip().split()[0]
-            filters["contains_character"] = letter
-
-    # Apply filters (reuse logic from earlier endpoint)
     results = list(database.values())
-    if "is_palindrome" in filters:
-        results = [r for r in results if r["properties"]["is_palindrome"] == filters["is_palindrome"]]
-    if "word_count" in filters:
-        results = [r for r in results if r["properties"]["word_count"] == filters["word_count"]]
-    if "min_length" in filters:
-        results = [r for r in results if r["properties"]["length"] >= filters["min_length"]]
-    if "contains_character" in filters:
-        results = [r for r in results if filters["contains_character"] in r["value"]]
-
-    if not results:
-        return jsonify({"error": "No matching strings found"}), 404
+    # Apply parsed filters
+    try:
+        if "is_palindrome" in filters:
+            results = [r for r in results if r["properties"]["is_palindrome"] == filters["is_palindrome"]]
+        if "word_count" in filters:
+            results = [r for r in results if r["properties"]["word_count"] == filters["word_count"]]
+        if "min_length" in filters:
+            results = [r for r in results if r["properties"]["length"] >= filters["min_length"]]
+        if "contains_character" in filters:
+            results = [r for r in results if filters["contains_character"] in r["value"]]
+        if not results:
+            return jsonify({"error": "Query parsed but resulted in conflicting filters"}), 422
+    except:
+        return jsonify({"error": "Error applying filters"}), 422
 
     return jsonify({
         "data": results,
@@ -156,8 +142,13 @@ def filter_by_natural_language():
         }
     }), 200
 
-
-
+@app.route("/strings/<string_value>", methods=["DELETE"])
+def delete_string(string_value):
+    for key, item in list(database.items()):
+        if item["value"] == string_value:
+            del database[key]
+            return '', 204
+    return jsonify({"error": "String not found"}), 404
 
 if __name__ == "__main__":
     app.run(debug=True)
